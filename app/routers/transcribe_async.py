@@ -9,7 +9,7 @@ from ..services.transcriber import TranscriptionService
 from ..services.audio_processor import AudioProcessor
 from ..config.settings import settings
 from ..jobs import create_job, update_job, get_job, JobStatus
-from ..schemas import TranscribeQuery  # ← Pydantic 모델
+from ..schemas import TranscribeQuery
 
 logger = logging.getLogger("app.timing")
 
@@ -23,7 +23,7 @@ def parse_query(
 
 def to_prob_int(avg_logprob) -> int:
     # exp(-0.1) ≒ 0.904 -> 90
-    # 0~100 사이의 정수로 변환
+    # 0~100 사이 int로 변환
     try:
         p = math.exp(avg_logprob) * 100
         return int(min(100, max(0, round(p))))
@@ -36,7 +36,7 @@ async def transcribe_async(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    query: TranscribeQuery = Depends(parse_query),  # ← Ellipsis 대신 함수
+    query: TranscribeQuery = Depends(parse_query),
     request_id: str = Query(None),
 ):
     suffix = Path(file.filename).suffix or ".bin"
@@ -57,16 +57,14 @@ async def transcribe_async(
 
     background_tasks.add_task(_worker, job.job_id, tmp_path, query)
 
-    # 상대 경로(리버스프록시/포트 바뀌어도 안전). 절대 URL이 필요하면 request.url_for("...") 사용.
     status_path = f"/jobs/{job.job_id}"
 
     body = {
         "job_id": job.job_id,
-        "status_url": status_path,  # 👈 바디에 포함
+        "status_url": status_path,
     }
     headers = {
-        "Location": status_path,  # 👈 202 Location 헤더
-        # 미들웨어가 이미 X-Request-ID를 붙이지만, 혹시 미들웨어 비활성화 시 대비
+        "Location": status_path,  # 202 Location 헤더
         "X-Request-ID": final_req_id or job.job_id,
     }
     return JSONResponse(content=body, headers=headers, status_code=202)

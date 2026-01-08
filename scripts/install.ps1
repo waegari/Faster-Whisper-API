@@ -57,7 +57,7 @@ $reqFile = Join-Path $Root 'requirements.txt'
 # 5. Install Dependencies (Hybrid: Offline First -> Online Fallback)
 Write-Host "Step 5: Installing Dependencies..."
 
-# 5-1. pip 업그레이드 (이것도 로컬 시도 후 온라인)
+# 5-1. pip 업그레이드
 try {
     Write-Host "  - Upgrading pip (Offline attempt)..."
     & $pip install --no-index --find-links "$Wheelhouse" --upgrade pip 2>$null
@@ -70,7 +70,7 @@ try {
 # 5-2. 메인 패키지 설치
 try {
     Write-Host "  - Attempting OFFLINE installation from wheelhouse..."
-    # --no-index: 인터넷 절대 안 씀
+    # --no-index: 인터넷 연결 X
     & $pip install --no-index --find-links "$Wheelhouse" -r "$reqFile"
     
     if ($LASTEXITCODE -eq 0) {
@@ -84,7 +84,7 @@ catch {
     Write-Warning "  - Falling back to ONLINE installation..."
     Write-Host "  - Downloading missing packages from PyPI (keeping local wheels priority)..."
     
-    # --no-index 제거: 로컬에 없거나 로컬 파일이 깨져있으면 인터넷에서 받음
+    # --no-index 제거: 로컬에 없거나 로컬 파일에 문제가 있다면 인터넷 통해 다운로드
     & $pip install --find-links "$Wheelhouse" -r "$reqFile"
 }
 

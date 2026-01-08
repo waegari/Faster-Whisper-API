@@ -10,7 +10,6 @@ class WhisperFactory:
 
     @lru_cache(maxsize=1)
     def get(self) -> WhisperModel:
-        # device_index, cpu_threads는 faster-whisper 버전에 따라 init/옵션 위치가 다를 수 있어 생략 가능
         return WhisperModel(self.kw["model_name"], device=self.kw["device"], compute_type=self.kw["compute_type"])
 
 

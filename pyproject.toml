@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 개발/테스트 편의 패키지
+# 개발/테스트 편의
 dev = [
   "ruff>=0.6.0",
   "black>=24.0.0",
@@ -60,11 +60,9 @@ Issues = "https://github.com/your-org-or-user/Faster-Whisper-API/issues"
 include = ["app*"]
 namespaces = false
 
-# 패키지 데이터(예: 환경파일 샘플 등) 포함
+# 패키지 데이터(환경파일 샘플 등) 포함
 [tool.setuptools.package-data]
 "app" = ["config/env/*"]
-
-# --- 코드 스타일 & 정적 분석 ---
 
 [tool.black]
 line-length = 120
@@ -91,7 +89,7 @@ line-length = 120
 target-version = "py310"
 select = ["E", "F", "W", "I", "UP", "B"]
 ignore = [
-  "E203",  # black과 충돌 가능한 규칙
+  "E203",  # black과 충돌할 가능성 있어서 무시
 ]
 exclude = [
   ".git",
@@ -107,8 +105,6 @@ profile = "black"
 line_length = 120
 py_version = 310
 known_first_party = ["app"]
-
-# --- 테스트 & 커버리지 ---
 
 [tool.pytest.ini_options]
 addopts = [
@@ -140,8 +136,6 @@ exclude_lines = [
   "raise NotImplementedError",
   "if __name__ == .__main__.:",
 ]
-
-# --- Mypy ---
 
 [tool.mypy]
 python_version = "3.10"

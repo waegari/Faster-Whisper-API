@@ -16,7 +16,7 @@ class TranscribeResult(BaseModel):
     language: str
     duration: float
     created_at: str
-    result: dict  # {"text": str, "segments": List[Segment]}
+    result: dict
 
 class TranscribeQuery(BaseModel):
     request_id: Optional[str] = None

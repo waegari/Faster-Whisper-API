@@ -13,7 +13,7 @@ import ffmpeg
 from pydub import AudioSegment
 
 
-prefix = os.environ.get("CONDA_PREFIX")  # 없으면 None
+prefix = os.environ.get("CONDA_PREFIX")
 ffmpeg_override = os.getenv("FW_FFMPEG")
 ffprobe_override = os.getenv("FW_FFPROBE")
 
@@ -32,7 +32,7 @@ AudioSegment.ffprobe = _ffprobe
 class _Defaults:
     MAX_AUDIO_BYTES: int = 25 * 1024 * 1024
     DEFAULT_SR: int = 16000
-    DEFAULT_BR: str = "96k"  # 내부적으로는 WAV 출력이라 비트레이트는 크게 의미 없음
+    DEFAULT_BR: str = "96k"
     DEFAULT_CH: int = 1
 
 
@@ -44,7 +44,6 @@ try:
     _BR = settings.DEFAULT_BR
     _CH = settings.DEFAULT_CH
 except Exception:
-    # settings 미존재 시 합리적 기본값
     _MAX_BYTES = _Defaults.MAX_AUDIO_BYTES
     _SR = _Defaults.DEFAULT_SR
     _BR = _Defaults.DEFAULT_BR
@@ -88,8 +87,6 @@ class AudioProcessor:
         self.silence_boundaries: Optional[List[Tuple[float, float]]] = None
         self.audio_info: Optional[dict] = None
 
-    # -------- 공통 유틸 --------
-
     def _export_to_disk(self, data: bytes, stem: str = "audio") -> Path:
         """버퍼 초과/디스크 저장 요청 시 WAV로 파일 저장"""
         output_dir = Path("assets/temp")
@@ -110,19 +107,14 @@ class AudioProcessor:
             start_ms = int(start * 1000)
             end_ms = int(end * 1000)
             if end_ms > start_ms:
-                # 범위가 원본보다 길어도 pydub이 안전하게 자름
                 audio = audio[start_ms:end_ms]
         return audio
 
     def _to_wav_pcm16_bytes(self, audio: AudioSegment) -> bytes:
-        """WAV(PCM16) 바이트로 내보내기"""
-        # 모노/샘플레이트/샘플폭(16bit) 정규화
         audio = audio.set_frame_rate(self.target_sr).set_channels(self.target_channels).set_sample_width(2)
         buf = SizeLimitedBuffer(limit=self.max_bytes)
-        audio.export(buf, format="wav")  # 포맷 명시 (중요)
+        audio.export(buf, format="wav")
         return buf.getvalue()
-
-    # -------- 메타 정보 --------
 
     def get_audio_info(self, get_new_info: bool = False) -> dict:
         if self.audio_info and (not get_new_info):
@@ -159,8 +151,6 @@ class AudioProcessor:
         self.audio_info = stream_info
         return stream_info
 
-    # -------- 오디오 변환 --------
-
     def convert(
         self,
         start: int = 0,
@@ -174,14 +164,11 @@ class AudioProcessor:
         path = self.source_audio_path
         print(f"[convert] input: {path.name}")
 
-        # 확장자 불문 안전 디코딩
         audio = AudioSegment.from_file(path)
         audio = self._clip_segment(audio, start, end)
 
         wav_bytes = self._to_wav_pcm16_bytes(audio)
         return self._write_or_path(wav_bytes, export_to_disk, stem=path.stem)
-
-    # -------- 비디오 → 오디오 추출 --------
 
     def demux(
         self,
@@ -208,7 +195,6 @@ class AudioProcessor:
             .run_async(pipe_stdout=True, pipe_stderr=True)
         )
 
-        # 스트리밍 읽기 + 한도 체크
         buf = SizeLimitedBuffer(limit=self.max_bytes)
         try:
             while True:
@@ -218,20 +204,16 @@ class AudioProcessor:
                 buf.write(chunk)
         except ValueError:
             proc.kill()
-            # 초과 시 현재까지의 데이터를 파일로라도 떨굴지 결정
             return self._export_to_disk(buf.getvalue(), stem=path.stem)
 
         wav_bytes = buf.getvalue()
 
-        # 클리핑이 필요한 경우: 디코딩 → 슬라이스 → 재인코드 (메모리 비용 감수)
         if end > start and start >= 0:
             seg = AudioSegment.from_file(BytesIO(wav_bytes), format="wav")
             seg = self._clip_segment(seg, start, end)
             wav_bytes = self._to_wav_pcm16_bytes(seg)
 
         return self._write_or_path(wav_bytes, export_to_disk, stem=path.stem)
-
-    # -------- 무음 탐지 --------
 
     def _detect_silence(
         self,
@@ -265,7 +247,6 @@ class AudioProcessor:
         starts = [float(x) for x in re.findall(r"silence_start:\s*([\d.]+)", stderr)]
         ends = [float(x) for x in re.findall(r"silence_end:\s*([\d.]+)", stderr)]
 
-        # 파일 끝까지 이어지는 무음일 경우 end 로그가 없으므로 duration을 보정
         if len(ends) < len(starts):
             ends.append(dur)
 
