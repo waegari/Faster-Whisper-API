@@ -15,6 +15,7 @@ logger = logging.getLogger("app.timing")
 
 router = APIRouter()
 
+cancellation_flags: dict[str, bool] = {}
 
 def parse_query(
     q: str = Form('{"language":"ko","vad":true,"is_video":false,"word_timestamps":false}'),
@@ -54,6 +55,7 @@ async def transcribe_async(
     final_req_id = request_id or request.headers.get("X-Request-ID") or getattr(query, "request_id", None)
 
     job = create_job(final_req_id)
+    cancellation_flags[job.job_id] = False
 
     background_tasks.add_task(_worker, job.job_id, tmp_path, query)
 
@@ -77,6 +79,13 @@ def get_status(job_id: str):
         raise HTTPException(404, "job not found")
     return job
 
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    if job_id in cancellation_flags:
+        cancellation_flags[job_id] = True
+        logger.info(f"🚩 Received cancel request for {job_id}")
+        return {"status": "cancelled"}
+    return {"status": "job not found or already finished"}
 
 async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
     update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="received")
@@ -118,6 +127,9 @@ async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
         idx = 0
         try:
             for seg in segments:
+                if cancellation_flags.get(job_id) is True:
+                    logger.warning(f"🛑 [Zombie Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
+                    return
                 txt = (seg.text or "").strip()
                 if txt:
                     all_text.append(txt)
@@ -150,8 +162,11 @@ async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
         update_job(job_id, status=JobStatus.done, ended_at=time.time(), progress=1.0, message="done", result=result)
     except Exception as e:
         update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=str(e))
+        pass
     finally:
         try:
+            if job_id in cancellation_flags:
+                del cancellation_flags[job_id]
             os.unlink(tmp_path)
         except:
             pass
