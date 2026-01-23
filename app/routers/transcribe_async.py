@@ -161,7 +161,20 @@ async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
         }
         update_job(job_id, status=JobStatus.done, ended_at=time.time(), progress=1.0, message="done", result=result)
     except Exception as e:
-        update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=str(e))
+        error_message = str(e)
+        
+        # ✅ [추가] FFmpeg/Subprocess 에러라면 stderr(진짜 원인)를 끄집어냄
+        if hasattr(e, 'stderr') and e.stderr:
+            try:
+                # bytes를 string으로 변환
+                decoded_stderr = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else str(e.stderr)
+                error_message += f" | Details: {decoded_stderr}"
+            except:
+                pass
+        
+        logger.error(f"Task {job_id} failed: {error_message}") # Python 로그에도 남김
+        
+        update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=error_message)
         pass
     finally:
         try:
