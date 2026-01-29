@@ -18,7 +18,7 @@ router = APIRouter()
 cancellation_flags: dict[str, bool] = {}
 
 def parse_query(
-    q: str = Form('{"language":"ko","vad":true,"is_video":false,"word_timestamps":false}'),
+    q: str = Form('{"task":"trancribe","language":"ko","vad":true,"is_video":false,"word_timestamps":false}'),
 ) -> TranscribeQuery:
     return TranscribeQuery.model_validate_json(q)
 
@@ -111,6 +111,7 @@ async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
         update_job(job_id, message="transcribing", progress=0.0)
         segments, info = svc.model.transcribe(
             str(svc._ensure_wav_path(media)),
+            task=query.task,
             language=query.language,
             vad_filter=query.vad,
             vad_parameters=dict(min_silence_duration_ms=300),

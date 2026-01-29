@@ -13,6 +13,7 @@ class Segment(BaseModel):
 
 class TranscribeResult(BaseModel):
     request_id: Optional[str] = None
+    task: str = "transcribe"
     language: str
     duration: float
     created_at: str
@@ -20,6 +21,7 @@ class TranscribeResult(BaseModel):
 
 class TranscribeQuery(BaseModel):
     request_id: Optional[str] = None
+    task: str = "transcribe"
     language: str = "ko"
     is_video: bool = False
     start: int = 0
