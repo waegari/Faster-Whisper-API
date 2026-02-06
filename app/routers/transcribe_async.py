@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request, UploadFile, Query, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import tempfile, os, asyncio, time, logging
+from urllib.request import urlopen
 from ..dependencies import get_model
 from ..services.transcriber import TranscriptionService
 from ..services.audio_processor import AudioProcessor
@@ -18,7 +19,7 @@ router = APIRouter()
 cancellation_flags: dict[str, bool] = {}
 
 def parse_query(
-    q: str = Form('{"task":"trancribe","language":"ko","vad":true,"is_video":false,"word_timestamps":false}'),
+    q: str = Form('{"task":"transcribe","language":"ko","vad":true,"is_video":false,"word_timestamps":false}'),
 ) -> TranscribeQuery:
     return TranscribeQuery.model_validate_json(q)
 
@@ -32,35 +33,43 @@ def to_prob_int(avg_logprob) -> int:
         return 0
 
 
-@router.post("/transcribe_async", status_code=202)
-async def transcribe_async(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    query: TranscribeQuery = Depends(parse_query),
-    request_id: str = Query(None),
-):
-    suffix = Path(file.filename).suffix or ".bin"
+def _download_to_temp(media_url: str) -> Path:
+    """media_url을 GET으로 받아 임시 파일에 저장. 경로 반환."""
+    suffix = Path(media_url).suffix or ".bin"
+    if "?" in suffix:
+        suffix = ".bin"
+    req = urlopen(media_url)
     with tempfile.NamedTemporaryFile(prefix="in_", suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
         size = 0
-        while chunk := await file.read(1024 * 1024):
+        while chunk := req.read(1024 * 1024):
             size += len(chunk)
             if size > settings.MAX_AUDIO_BYTES:
                 tmp.close()
                 os.unlink(tmp_path)
+                req.close()
                 raise HTTPException(413, detail="File too large")
             tmp.write(chunk)
+    return tmp_path
 
+
+@router.post("/transcribe_async", status_code=202)
+async def transcribe_async(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    media_url: str = Form(..., description="미디어 파일 URL (스케줄러가 서빙하는 결과 URL 등)"),
+    query: TranscribeQuery = Depends(parse_query),
+    request_id: str = Query(None),
+):
+    """파일 업로드 없이 media_url만 받아 202 즉시 반환. worker에서 URL 다운로드 후 전사."""
     final_req_id = request_id or request.headers.get("X-Request-ID") or getattr(query, "request_id", None)
 
     job = create_job(final_req_id)
     cancellation_flags[job.job_id] = False
 
-    background_tasks.add_task(_worker, job.job_id, tmp_path, query)
+    background_tasks.add_task(_worker, job.job_id, media_url, query)
 
     status_path = f"/jobs/{job.job_id}"
-
     body = {
         "job_id": job.job_id,
         "status_url": status_path,
@@ -79,6 +88,7 @@ def get_status(job_id: str):
         raise HTTPException(404, "job not found")
     return job
 
+
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(job_id: str):
     if job_id in cancellation_flags:
@@ -87,9 +97,21 @@ def cancel_job(job_id: str):
         return {"status": "cancelled"}
     return {"status": "job not found or already finished"}
 
-async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
-    update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="received")
+
+async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
+    update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="downloading")
+    tmp_path = None
     try:
+        tmp_path = _download_to_temp(media_url)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Task {job_id} download failed: {e}")
+        update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=str(e))
+        return
+
+    try:
+        update_job(job_id, message="received")
         model = get_model()
         ap = AudioProcessor(
             path=tmp_path,
@@ -163,24 +185,20 @@ async def _worker(job_id: str, tmp_path: Path, query: TranscribeQuery):
         update_job(job_id, status=JobStatus.done, ended_at=time.time(), progress=1.0, message="done", result=result)
     except Exception as e:
         error_message = str(e)
-        
-        # ✅ [추가] FFmpeg/Subprocess 에러라면 stderr(진짜 원인)를 끄집어냄
         if hasattr(e, 'stderr') and e.stderr:
             try:
                 # bytes를 string으로 변환
                 decoded_stderr = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else str(e.stderr)
                 error_message += f" | Details: {decoded_stderr}"
-            except:
+            except Exception:
                 pass
-        
-        logger.error(f"Task {job_id} failed: {error_message}") # Python 로그에도 남김
-        
+        logger.error(f"Task {job_id} failed: {error_message}")
         update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=error_message)
-        pass
     finally:
         try:
             if job_id in cancellation_flags:
                 del cancellation_flags[job_id]
-            os.unlink(tmp_path)
-        except:
+            if tmp_path and tmp_path.exists():
+                os.unlink(tmp_path)
+        except Exception:
             pass
