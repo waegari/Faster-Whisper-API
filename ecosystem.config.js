@@ -1,7 +1,7 @@
 module.exports = {
     apps: [
       {
-        name: "Faster-Whsper-API",
+        name: "Faster-Whisper-API",
         script: "./.venv/Scripts/uvicorn.exe", 
         args: "app.main:app --host 0.0.0.0 --port 8000",
         interpreter: "none",
