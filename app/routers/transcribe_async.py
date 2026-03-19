@@ -128,9 +128,12 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
             else ap.convert(start=query.start, end=query.end, export_to_disk=False)
         )
 
+        # 1. TranscriptionService 인스턴스화 (모델 및 오디오 포맷 설정)
         svc = TranscriptionService(source=media, model=model, sr=settings.DEFAULT_SR, ch=settings.DEFAULT_CH)
 
         update_job(job_id, message="transcribing", progress=0.0)
+        
+        # 2. 제너레이터(segments) 받아오기
         segments, info = svc.model.transcribe(
             str(svc._ensure_wav_path(media)),
             task=query.task,
@@ -145,49 +148,53 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
             condition_on_previous_text=False,
         )
 
-        all_text, all_segments = [], []
+        raw_segments = []
         duration = float(getattr(info, "duration", 0.0) or 0.0)
-        idx = 0
-        try:
-            for seg in segments:
-                if cancellation_flags.get(job_id) is True:
-                    logger.warning(f"🛑 [Zombie Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
-                    return
-                txt = (seg.text or "").strip()
-                if txt:
-                    all_text.append(txt)
-                    all_segments.append(
-                        {"index": idx, "start": float(seg.start), "end": float(seg.end), "content": txt, "avg_logprob": seg.avg_logprob, "prob": to_prob_int(seg.avg_logprob),}
-                    )
-                    idx += 1
-                    if duration > 0:
-                        update_job(job_id, progress=min(0.99, seg.end / duration))
-                await asyncio.sleep(0)
-        except TypeError:
-            for seg in segments:
-                txt = (seg.text or "").strip()
-                if txt:
-                    all_text.append(txt)
-                    all_segments.append(
-                        {"index": idx, "start": float(seg.start), "end": float(seg.end), "content": txt}
-                    )
-                    idx += 1
-                    if duration > 0:
-                        update_job(job_id, progress=min(0.99, seg.end / duration))
+
+        # 3. 취소 여부 체크 및 진행률 업데이트
+        for seg in segments:
+            if cancellation_flags.get(job_id) is True:
+                logger.warning(f"🛑 [Process Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
+                return
+            
+            txt = (seg.text or "").strip()
+            if txt:
+                # logprob가 None인 경우를 대비해 0.0으로 기본값 처리
+                avg_logprob = getattr(seg, 'avg_logprob', None)
+                if avg_logprob is None:
+                    avg_logprob = 0.0
+                    
+                raw_segments.append({
+                    "start": float(seg.start),
+                    "end": float(seg.end),
+                    "content": txt,
+                    "avg_logprob": avg_logprob
+                })
+            
+            if duration > 0:
+                update_job(job_id, progress=min(0.99, seg.end / duration))
+            await asyncio.sleep(0)
+
+        # 4. hallucination 대응
+        processed_segments = svc._post_process_segments(raw_segments)
+        
+        # 5. 텍스트 병합
+        all_text = " ".join([seg["content"] for seg in processed_segments])
 
         now = datetime.now()
         result = {
             "language": query.language,
             "duration": duration,
             "created_at": now.strftime("%Y-%m-%d %H:%M:%S.") + str(now.microsecond)[-3:],
-            "result": {"text": " ".join(all_text).strip(), "segments": all_segments},
+            "result": {"text": all_text.strip(), "segments": processed_segments},
         }
+        
         update_job(job_id, status=JobStatus.done, ended_at=time.time(), progress=1.0, message="done", result=result)
+        
     except Exception as e:
         error_message = str(e)
         if hasattr(e, 'stderr') and e.stderr:
             try:
-                # bytes를 string으로 변환
                 decoded_stderr = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else str(e.stderr)
                 error_message += f" | Details: {decoded_stderr}"
             except Exception:
