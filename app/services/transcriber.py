@@ -104,7 +104,6 @@ class TranscriptionService:
         return cleaned_text, max(0.01, penalty) # 최소 1%의 확률은 보존
 
     def _post_process_segments(self, raw_segments: List[dict]) -> List[dict]:
-        """개별 환각 처리 및 삭제 후 -> 한국어 종결 어미 기반 문장 병합"""
         if not raw_segments:
             return []
 
@@ -127,7 +126,7 @@ class TranscriptionService:
                 "prob": final_prob
             })
 
-        # 2. 동일 문장 다중 세그먼트 반복 ("예정아" x N) 페널티 적용
+        # 2. 동일 문장 다중 세그먼트 반복 페널티 적용
         deduped_raw = []
         i = 0
         while i < len(processed_raw):
@@ -139,7 +138,7 @@ class TranscriptionService:
                 j += 1
 
             if count >= 3:
-                # 3번 이상 반복되면 첫 번째 세그먼트의 확률을 1/n로 깎아버림
+                # 3번 이상 반복되면 첫 번째 세그먼트의 확률을 1/n로 깎음
                 current_seg["prob"] = max(1, int(current_seg["prob"] / count))
                 deduped_raw.append(current_seg)
             else:
@@ -147,57 +146,14 @@ class TranscriptionService:
                     deduped_raw.append(processed_raw[k])
             i = j
 
-        # 3. 신뢰도가 극단적으로 낮은 세그먼트(10 이하) 아예 삭제 (이 단계에서 환각 텍스트 증발)
+        # 3. 신뢰도가 극단적으로 낮은 세그먼트(10 이하) 삭제
         survived_segments = [seg for seg in deduped_raw if seg["prob"] > 10]
 
-        # 4. 살아남은 정상 세그먼트들만 모아서 종결 어미 기반 병합 수행
-        merged_segments = []
-        current_text = ""
-        current_start = None
-        current_end = None
-        current_logprobs = []
-
-        end_chars = ('다', '요', '까', '죠', '네', '지', '.', '?', '!')
-
-        for seg in survived_segments:
-            text = seg["content"]
-            if current_start is None:
-                current_start = seg["start"]
-            current_end = seg["end"]
-            current_logprobs.append(seg["avg_logprob"])
-
-            current_text += (" " if current_text else "") + text
-
-            # 텍스트의 마지막 글자가 종결 어미인지 확인
-            if current_text and current_text[-1] in end_chars:
-                avg_logprob = sum(current_logprobs) / len(current_logprobs)
-                merged_segments.append({
-                    "start": current_start,
-                    "end": current_end,
-                    "content": current_text.strip(),
-                    "avg_logprob": avg_logprob,
-                    "prob": self.to_prob_int(avg_logprob)
-                })
-                current_start = None
-                current_text = ""
-                current_logprobs = []
-
-        # 병합 안 된 잔여 텍스트 처리
-        if current_text:
-            avg_logprob = sum(current_logprobs) / len(current_logprobs) if current_logprobs else 0.0
-            merged_segments.append({
-                "start": current_start,
-                "end": current_end,
-                "content": current_text.strip(),
-                "avg_logprob": avg_logprob,
-                "prob": self.to_prob_int(avg_logprob)
-            })
-
-        # 5. 인덱스 재부여
-        for idx, seg in enumerate(merged_segments):
+        # 4. 인덱스 재부여
+        for idx, seg in enumerate(survived_segments):
             seg["index"] = idx
 
-        return merged_segments
+        return survived_segments
 
     def transcribe(
         self,
