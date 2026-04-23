@@ -29,7 +29,7 @@ class TranscriptionService:
 
     def __init__(
         self,
-        source: Union[bytes, Path, str],
+        source: Union[bytes, Path, str, None] = None,
         *,
         model: Optional[WhisperModel] = None,
         sr: int = 16000,
@@ -44,7 +44,7 @@ class TranscriptionService:
             raise RuntimeError("WhisperModel is not provided and app.deps.get_model() not found.")
 
         self.source_path: Optional[Path] = None
-        if isinstance(source, (str, Path)):
+        if source is not None and isinstance(source, (str, Path)):
             self.source_path = Path(source)
 
         self.target_sr = int(sr)
@@ -168,75 +168,72 @@ class TranscriptionService:
         export_json_to_disk: bool = False,
     ) -> dict:
         """
-        오디오/비디오 파일을 전사
-        - is_video=True → demux()로 오디오 추출
-        - is_video=False → convert()로 WAV 변환
+        오디오/비디오 파일을 전사 (OOM 방지를 위해 내부적으로 청킹 처리)
         """
         if not self.source_path:
             raise ValueError(
                 "For convert/demux, `source` must be a file path. Got bytes—use router to write temp file first."
             )
 
-        # 1) 오디오 준비 (WAV bytes or Path)
         ap = AudioProcessor(
             path=self.source_path,
             sr=self.target_sr,
             channels=self.target_ch,
             max_bytes=self.max_bytes,
         )
-        media = (
-            ap.demux(start=start, end=end, export_to_disk=export_audio_to_disk)
-            if is_video
-            else ap.convert(start=start, end=end, export_to_disk=export_audio_to_disk)
-        )
-
-        # 2) Whisper가 읽을 수 있도록 파일 경로 확보
-        wav_path = self._ensure_wav_path(media)
-
-        # 3) transcribe
-        segments, info = self.model.transcribe(
-            str(wav_path),
-            language=language,
-            vad_filter=vad,
-            vad_parameters=dict(min_silence_duration_ms=300),
-            temperature=0.0,
-            beam_size=6,
-            best_of=1,
-            patience=1.0,
-            word_timestamps=word_timestamps,
-            condition_on_previous_text=False,
-        )
-
-        # 4) 초기 세그먼트 파싱
-        raw_segments: List[dict] = []
-        for seg in segments:
-            txt = (seg.text or "").strip()
-            if not txt:
-                continue
-            raw_segments.append({
-                "start": float(seg.start),
-                "end": float(seg.end),
-                "content": txt,
-                "avg_logprob": seg.avg_logprob
-            })
-
-        # 4-1) 후처리 적용 (문장 병합 및 환각 제거)
-        processed_segments = self._post_process_segments(raw_segments)
         
-        # 4-2) 전체 텍스트 추출
+        segment_time = 3600
+        chunk_paths = ap.segment(segment_time=segment_time, start=start, end=end)
+
+        all_raw_segments: List[dict] = []
+        total_duration = 0.0
+
+        for i, chunk_path in enumerate(chunk_paths):
+            segments, info = self.model.transcribe(
+                str(chunk_path),
+                language=language,
+                vad_filter=vad,
+                vad_parameters=dict(min_silence_duration_ms=300),
+                temperature=0.0,
+                beam_size=6,
+                best_of=1,
+                patience=1.0,
+                word_timestamps=word_timestamps,
+                condition_on_previous_text=False,
+            )
+
+            chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
+            time_offset = total_duration + start
+
+            for seg in segments:
+                txt = (seg.text or "").strip()
+                if not txt:
+                    continue
+                avg_logprob = getattr(seg, 'avg_logprob', 0.0)
+                if avg_logprob is None:
+                    avg_logprob = 0.0
+                all_raw_segments.append({
+                    "start": float(seg.start) + time_offset,
+                    "end": float(seg.end) + time_offset,
+                    "content": txt,
+                    "avg_logprob": avg_logprob
+                })
+
+            total_duration += chunk_duration
+            cleanup_path(chunk_path)
+
+        # 후처리 적용 (문장 병합 및 환각 제거)
+        processed_segments = self._post_process_segments(all_raw_segments)
+        
+        # 전체 텍스트 추출
         all_text = " ".join([seg["content"] for seg in processed_segments])
 
         now = datetime.now()
         result = {
             "language": language,
-            "duration": float(getattr(info, "duration", 0.0) or 0.0),
+            "duration": total_duration,
             "created_at": now.strftime("%Y-%m-%d %H:%M:%S.") + str(now.microsecond)[-3:],
             "result": {"text": all_text.strip(), "segments": processed_segments},
         }
-
-        # 5) 임시 파일 정리
-        # - 호출자가 Path를 넘긴 경우는 삭제하지 않음
-        if isinstance(media, bytes):
-            cleanup_path(wav_path)
 
         return result

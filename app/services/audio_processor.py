@@ -151,6 +151,99 @@ class AudioProcessor:
         self.audio_info = stream_info
         return stream_info
 
+    def _calculate_split_points(
+        self,
+        segment_time: int = 3600,
+        start: int = 0,
+        end: int = 0,
+        min_silence_sec: float = 0.5,
+        noise: str = "-30dB"
+    ) -> List[Tuple[float, float]]:
+        a_info = self.get_audio_info()
+        total_dur = float(a_info.get("duration", 0.0) or 0.0)
+        
+        actual_start = float(start)
+        actual_end = float(end) if end > start and start >= 0 else total_dur
+        
+        if actual_end - actual_start <= segment_time:
+            return [(actual_start, actual_end)]
+            
+        silences = self._detect_silence(noise=noise, d=min_silence_sec)
+        
+        splits = []
+        current_start = actual_start
+        
+        while current_start < actual_end:
+            target_end = current_start + segment_time
+            if target_end >= actual_end:
+                splits.append((current_start, actual_end))
+                break
+                
+            best_split = target_end
+            min_diff = float('inf')
+            
+            for s, e in silences:
+                mid = (s + e) / 2.0
+                if mid <= current_start:
+                    continue
+                if mid >= actual_end:
+                    continue
+                    
+                diff = abs(mid - target_end)
+                # Only consider silences within a 10-minute window (600 seconds)
+                if diff < 600 and diff < min_diff:
+                    min_diff = diff
+                    best_split = mid
+                    
+            splits.append((current_start, best_split))
+            current_start = best_split
+            
+        return splits
+
+    def segment(self, segment_time: int = 3600, start: int = 0, end: int = 0) -> List[Path]:
+        """
+        비디오/오디오에서 오디오를 추출하고 무음 구간을 기준으로 지정된 시간(초) 단위로 분할하여 디스크에 저장합니다.
+        메모리를 거의 사용하지 않고(OOM 방지) 빠르게 처리합니다.
+        """
+        from app.services.temp_files import ensure_temp_dir
+        output_dir = ensure_temp_dir()
+        stem = self.source_audio_path.stem
+        
+        split_points = self._calculate_split_points(
+            segment_time=segment_time,
+            start=start,
+            end=end,
+            min_silence_sec=0.5
+        )
+        
+        segments = []
+        
+        for i, (s, e) in enumerate(split_points):
+            output_path = output_dir / f"{stem}_{i:03d}.wav"
+            cmd = [
+                _ffmpeg,
+                "-y",
+                "-ss", str(s),
+                "-t", str(e - s),
+                "-i", str(self.source_audio_path),
+                "-vn",  # 비디오 스트림 무시
+                "-map", "0:a:0",  # 첫 번째 오디오 스트림 선택
+                "-acodec", "pcm_s16le",
+                "-ac", str(self.target_channels),
+                "-ar", str(self.target_sr),
+                str(output_path)
+            ]
+            print(f"[segment] Running ffmpeg for chunk {i}: {' '.join(cmd)}")
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            except subprocess.CalledProcessError as err:
+                err_msg = err.stderr.decode("utf-8", errors="ignore") if err.stderr else "Unknown error"
+                raise RuntimeError(f"FFmpeg segmentation failed at chunk {i}: {err_msg}")
+                
+            segments.append(output_path)
+            
+        return segments
+
     def convert(
         self,
         start: int = 0,
