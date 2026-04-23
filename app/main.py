@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .routers import transcribe_async
 from .middleware import timing_middleware
+from .config.settings import settings
+from .services.temp_files import ensure_temp_dir, cleanup_stale_temp_files
 
 
 logging.basicConfig(
@@ -48,5 +50,16 @@ app.add_middleware(
 app.middleware("http")(timing_middleware)
 
 app.include_router(transcribe_async.router, prefix="")
+
+
+@app.on_event("startup")
+async def _prepare_runtime_dirs() -> None:
+    ensure_temp_dir()
+    removed = cleanup_stale_temp_files()
+    logging.getLogger("app.temp").info(
+        "Temp dir ready: %s (removed %s stale files)",
+        settings.TEMP_DIR,
+        removed,
+    )
 
 # uvicorn app.main:app --host 0.0.0.0 --port 8000

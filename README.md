@@ -77,6 +77,13 @@ Make sure `ffmpeg` is available on PATH.
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 ```
 
+Optional temp-file settings:
+
+```bash
+TEMP_DIR=D:\Temp
+TEMP_FILE_TTL_HOURS=24
+```
+
 ### 3) Health Check
 
 ```bash

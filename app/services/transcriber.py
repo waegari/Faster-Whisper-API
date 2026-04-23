@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import math
 import re
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Union, List, Optional
@@ -12,6 +11,7 @@ from pydub import AudioSegment
 from faster_whisper import WhisperModel
 
 from app.services.audio_processor import AudioProcessor
+from app.services.temp_files import create_named_temp_file, cleanup_path
 
 try:
     from app.dependencies import get_model as _get_model
@@ -53,11 +53,11 @@ class TranscriptionService:
 
     def _bytes_to_tmp_wav(self, data: bytes) -> Path:
         """bytes → 임시 WAV 파일로 저장"""
-        tmp = tempfile.NamedTemporaryFile(prefix="stt_", suffix=".wav", delete=False)
-        audio = AudioSegment.from_file(io.BytesIO(data))
-        audio = audio.set_frame_rate(self.target_sr).set_channels(self.target_ch).set_sample_width(2)
-        audio.export(tmp.name, format="wav")
-        return Path(tmp.name)
+        with create_named_temp_file(prefix="stt_", suffix=".wav") as tmp:
+            audio = AudioSegment.from_file(io.BytesIO(data))
+            audio = audio.set_frame_rate(self.target_sr).set_channels(self.target_ch).set_sample_width(2)
+            audio.export(tmp.name, format="wav")
+            return Path(tmp.name)
 
     def _ensure_wav_path(self, payload: Union[bytes, Path]) -> Path:
         """
@@ -236,10 +236,7 @@ class TranscriptionService:
 
         # 5) 임시 파일 정리
         # - 호출자가 Path를 넘긴 경우는 삭제하지 않음
-        try:
-            if isinstance(media, bytes):
-                wav_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if isinstance(media, bytes):
+            cleanup_path(wav_path)
 
         return result

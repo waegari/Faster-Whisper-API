@@ -3,11 +3,12 @@ import math
 from fastapi import APIRouter, Request, UploadFile, Query, File, BackgroundTasks, Depends, HTTPException, Form
 from fastapi.responses import JSONResponse
 from pathlib import Path
-import tempfile, os, asyncio, time, logging
+import asyncio, time, logging
 from urllib.request import urlopen
 from ..dependencies import get_model
 from ..services.transcriber import TranscriptionService
 from ..services.audio_processor import AudioProcessor
+from ..services.temp_files import create_named_temp_file, cleanup_path
 from ..config.settings import settings
 from ..jobs import create_job, update_job, get_job, JobStatus
 from ..schemas import TranscribeQuery
@@ -39,14 +40,14 @@ def _download_to_temp(media_url: str) -> Path:
     if "?" in suffix:
         suffix = ".bin"
     req = urlopen(media_url)
-    with tempfile.NamedTemporaryFile(prefix="in_", suffix=suffix, delete=False) as tmp:
+    with create_named_temp_file(prefix="in_", suffix=suffix) as tmp:
         tmp_path = Path(tmp.name)
         size = 0
         while chunk := req.read(1024 * 1024):
             size += len(chunk)
             if size > settings.MAX_AUDIO_BYTES:
                 tmp.close()
-                os.unlink(tmp_path)
+                cleanup_path(tmp_path)
                 req.close()
                 raise HTTPException(413, detail="File too large")
             tmp.write(chunk)
@@ -101,6 +102,8 @@ def cancel_job(job_id: str):
 async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
     update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="downloading")
     tmp_path = None
+    media = None
+    wav_path = None
     try:
         tmp_path = _download_to_temp(media_url)
     except HTTPException:
@@ -134,8 +137,9 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
         update_job(job_id, message="transcribing", progress=0.0)
         
         # 2. 제너레이터(segments) 받아오기
+        wav_path = svc._ensure_wav_path(media)
         segments, info = svc.model.transcribe(
-            str(svc._ensure_wav_path(media)),
+            str(wav_path),
             task=query.task,
             language=query.language,
             vad_filter=query.vad,
@@ -205,7 +209,7 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
         try:
             if job_id in cancellation_flags:
                 del cancellation_flags[job_id]
-            if tmp_path and tmp_path.exists():
-                os.unlink(tmp_path)
+            cleanup_path(wav_path if isinstance(media, bytes) else None)
+            cleanup_path(tmp_path)
         except Exception:
             pass
