@@ -118,13 +118,17 @@ class TranscriptionService:
             base_prob = self.to_prob_int(seg["avg_logprob"])
             final_prob = int(base_prob * penalty)
 
-            processed_raw.append({
+            seg_dict = {
                 "start": seg["start"],
                 "end": seg["end"],
                 "content": cleaned_text,
                 "avg_logprob": seg["avg_logprob"],
                 "prob": final_prob
-            })
+            }
+            if "speaker" in seg:
+                seg_dict["speaker"] = seg["speaker"]
+                
+            processed_raw.append(seg_dict)
 
         # 2. 동일 문장 다중 세그먼트 반복 페널티 적용
         deduped_raw = []
