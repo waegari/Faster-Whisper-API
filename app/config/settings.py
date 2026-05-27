@@ -16,7 +16,7 @@ class Settings:
     DEFAULT_BR: str = "96k"  # bit rate
     DEFAULT_CH: int = 1  # number of channel(s)
     MAX_CHUNK_DURATION_MS: int = (2 * 60 + 5) * 60 * 1000
-    TEMP_DIR: Path = Path(r"D:\Temp")
+    TEMP_DIR: Path = Path(r"Temp")
     TEMP_FILE_TTL_HOURS: int = 24
 
     def __post_init__(self):
