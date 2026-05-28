@@ -11,7 +11,7 @@ from faster_whisper.audio import decode_audio
 from ..services.audio_processor import AudioProcessor
 from ..services.temp_files import create_named_temp_file, cleanup_path
 from ..config.settings import settings
-from ..jobs import create_job, update_job, get_job, JobStatus
+from ..jobs import create_job, update_job, get_job, JobStatus, get_active_job_count
 from ..schemas import TranscribeQuery
 
 logger = logging.getLogger("app.timing")
