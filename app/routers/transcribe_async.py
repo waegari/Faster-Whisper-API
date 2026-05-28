@@ -4,14 +4,14 @@ from fastapi import APIRouter, Request, UploadFile, Query, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import asyncio, time, logging
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from ..dependencies import get_model, get_senko
 from ..services.transcriber import TranscriptionService
 from faster_whisper.audio import decode_audio
 from ..services.audio_processor import AudioProcessor
 from ..services.temp_files import create_named_temp_file, cleanup_path
 from ..config.settings import settings
-from ..jobs import create_job, update_job, get_job, JobStatus
+from ..jobs import create_job, update_job, get_job, JobStatus, get_active_job_count
 from ..schemas import TranscribeQuery
 
 logger = logging.getLogger("app.timing")
@@ -37,14 +37,24 @@ def to_prob_int(avg_logprob) -> int:
 
 def _download_to_temp(media_url: str) -> Path:
     """media_url을 GET으로 받아 임시 파일에 저장. 경로 반환."""
-    suffix = Path(media_url).suffix or ".bin"
+    # Remove any accidental quotes or whitespaces
+    clean_url = media_url.strip(' "\'\n\r')
+    
+    suffix = Path(clean_url).suffix or ".bin"
     if "?" in suffix:
         suffix = ".bin"
-    req = urlopen(media_url)
-    with create_named_temp_file(prefix="in_", suffix=suffix) as tmp:
-        tmp_path = Path(tmp.name)
-        while chunk := req.read(1024 * 1024):
-            tmp.write(chunk)
+        
+    # Add User-Agent to prevent 403 Forbidden errors from some servers
+    req = Request(
+        clean_url, 
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    )
+    
+    with urlopen(req) as response:
+        with create_named_temp_file(prefix="in_", suffix=suffix) as tmp:
+            tmp_path = Path(tmp.name)
+            while chunk := response.read(1024 * 1024):
+                tmp.write(chunk)
     return tmp_path
 
 
@@ -92,6 +102,18 @@ def cancel_job(job_id: str):
         return {"status": "cancelled"}
     return {"status": "job not found or already finished"}
 
+@router.get("/status")
+def server_status():
+    """
+    STT 서버의 현재 상태를 반환합니다. 
+    Node.js 스케줄러가 서버가 대기 중(idle)인지 작업 중(busy)인지 확인하여 작업을 할당할 수 있도록 합니다.
+    """
+    active_jobs = get_active_job_count()
+    return {
+        "status": "busy" if active_jobs > 0 else "idle",
+        "active_jobs": active_jobs,
+        "message": "작업 처리 중" if active_jobs > 0 else "대기 중"
+    }
 
 async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
     update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="downloading")

@@ -47,3 +47,8 @@ def update_job(job_id: str, **fields):
             return
         for k, v in fields.items():
             setattr(j, k, v)
+
+
+def get_active_job_count() -> int:
+    with _LOCK:
+        return sum(1 for j in _STORE.values() if j.status in (JobStatus.queued, JobStatus.processing))
