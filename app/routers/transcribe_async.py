@@ -41,6 +41,8 @@ def _download_to_temp(media_url: str) -> Path:
     # Remove any accidental quotes or whitespaces
     clean_url = media_url.strip(' "\'\n\r')
     
+    logger.info(f"Attempting to download from: {clean_url}")
+    
     suffix = Path(clean_url).suffix or ".bin"
     if "?" in suffix:
         suffix = ".bin"
@@ -51,7 +53,11 @@ def _download_to_temp(media_url: str) -> Path:
         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     )
     
-    with urlopen(req) as response:
+    # Bypass proxy settings just in case a dead local proxy is configured
+    from urllib.request import build_opener, ProxyHandler
+    opener = build_opener(ProxyHandler({}))
+    
+    with opener.open(req) as response:
         with create_named_temp_file(prefix="in_", suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)
             while chunk := response.read(1024 * 1024):
