@@ -4,7 +4,8 @@ from fastapi import APIRouter, Request, UploadFile, Query, File, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import asyncio, time, logging
-from urllib.request import urlopen, Request
+from urllib.request import urlopen
+from urllib.request import Request as URLRequest
 from ..dependencies import get_model, get_senko
 from ..services.transcriber import TranscriptionService
 from faster_whisper.audio import decode_audio
@@ -45,7 +46,7 @@ def _download_to_temp(media_url: str) -> Path:
         suffix = ".bin"
         
     # Add User-Agent to prevent 403 Forbidden errors from some servers
-    req = Request(
+    req = URLRequest(
         clean_url, 
         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     )
