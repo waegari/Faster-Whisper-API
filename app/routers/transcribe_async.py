@@ -91,3 +91,162 @@ def cancel_job(job_id: str):
         logger.info(f"🚩 Received cancel request for {job_id}")
         return {"status": "cancelled"}
     return {"status": "job not found or already finished"}
+
+
+@router.get("/status")
+def server_status():
+    """
+    STT 서버의 현재 상태를 반환합니다. 
+    Node.js 스케줄러가 서버가 대기 중(idle)인지 작업 중(busy)인지 확인하여 작업을 할당할 수 있도록 합니다.
+    """
+    active_jobs = get_active_job_count()
+    return {
+        "status": "busy" if active_jobs > 0 else "idle",
+        "active_jobs": active_jobs,
+        "message": "작업 처리 중" if active_jobs > 0 else "대기 중"
+    }
+
+async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
+    update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="downloading")
+    tmp_path = None
+    full_wav_path = None
+    try:
+        tmp_path = _download_to_temp(media_url)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Task {job_id} download failed: {e}")
+        update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=str(e))
+        return
+
+    try:
+        update_job(job_id, message="received")
+        model = get_model()
+        diarizer = get_senko()
+        
+        ap = AudioProcessor(
+            path=tmp_path,
+            sr=settings.DEFAULT_SR,
+            br=settings.DEFAULT_BR,
+            channels=settings.DEFAULT_CH,
+            max_bytes=settings.MAX_AUDIO_BYTES,
+        )
+
+        update_job(job_id, message="extracting full audio")
+        
+        # 1. 전체 오디오를 WAV로 추출
+        full_wav_path = ap.extract_wav(start=query.start, end=query.end)
+
+        update_job(job_id, message="diarizing (senko)")
+        
+        # 2. Senko 화자 분리
+        senko_result = diarizer.diarize(str(full_wav_path), generate_colors=False)
+        merged_segments = senko_result.get("merged_segments", [])
+        
+        update_job(job_id, message="loading audio for slicing")
+        
+        # 3. 오디오 배열 메모리 로드
+        audio_array = decode_audio(str(full_wav_path), sampling_rate=settings.DEFAULT_SR)
+        
+        # 4. TranscriptionService 인스턴스화
+        svc = TranscriptionService(source=None, model=model, sr=settings.DEFAULT_SR, ch=settings.DEFAULT_CH)
+
+        update_job(job_id, message="transcribing", progress=0.0)
+        
+        raw_segments = []
+        total_duration = float(audio_array.shape[0]) / settings.DEFAULT_SR
+        
+        for i, spk_seg in enumerate(merged_segments):
+            if cancellation_flags.get(job_id) is True:
+                logger.warning(f"🛑 [Process Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
+                return
+            
+            s_time = float(spk_seg["start"])
+            e_time = float(spk_seg["end"])
+            speaker = spk_seg.get("speaker", "SPEAKER_00")
+            
+            s_sample = int(s_time * settings.DEFAULT_SR)
+            e_sample = int(e_time * settings.DEFAULT_SR)
+            
+            if e_sample <= s_sample:
+                continue
+                
+            seg_audio = audio_array[s_sample:e_sample]
+            
+            # Whisper Transcribe
+            segments, info = svc.model.transcribe(
+                seg_audio,
+                task=query.task,
+                language=query.language,
+                vad_filter=query.vad,
+                vad_parameters=dict(min_silence_duration_ms=300),
+                temperature=0.0,
+                beam_size=6,
+                best_of=1,
+                patience=1.0,
+                word_timestamps=query.word_timestamps,
+                condition_on_previous_text=False,
+            )
+
+            # Whisper 세그먼트 시간 보정 및 병합
+            for w_seg in segments:
+                if cancellation_flags.get(job_id) is True:
+                    logger.warning(f"🛑 [Process Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
+                    return
+                
+                txt = (w_seg.text or "").strip()
+                if txt:
+                    avg_logprob = getattr(w_seg, 'avg_logprob', None)
+                    if avg_logprob is None:
+                        avg_logprob = 0.0
+                        
+                    raw_segments.append({
+                        "start": float(w_seg.start) + s_time + query.start,
+                        "end": float(w_seg.end) + s_time + query.start,
+                        "content": txt,
+                        "avg_logprob": avg_logprob,
+                        "speaker": speaker
+                    })
+                
+                # 진행률 업데이트
+                if e_time > s_time:
+                    current_progress = (i + (w_seg.end / (e_time - s_time))) / max(1, len(merged_segments))
+                    update_job(job_id, progress=min(0.99, current_progress))
+                await asyncio.sleep(0)
+
+        # 5. hallucination 대응 및 병합
+        raw_segments.sort(key=lambda x: x["start"])
+        processed_segments = svc._post_process_segments(raw_segments)
+        
+        # 6. 텍스트 병합
+        all_text = " ".join([seg["content"] for seg in processed_segments])
+
+        now = datetime.now()
+        result = {
+            "language": query.language,
+            "duration": total_duration,
+            "created_at": now.strftime("%Y-%m-%d %H:%M:%S.") + str(now.microsecond)[-3:],
+            "result": {"text": all_text.strip(), "segments": processed_segments},
+        }
+        
+        update_job(job_id, status=JobStatus.done, ended_at=time.time(), progress=1.0, message="done", result=result)
+        
+    except Exception as e:
+        error_message = str(e)
+        if hasattr(e, 'stderr') and e.stderr:
+            try:
+                decoded_stderr = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else str(e.stderr)
+                error_message += f" | Details: {decoded_stderr}"
+            except Exception:
+                pass
+        logger.error(f"Task {job_id} failed: {error_message}")
+        update_job(job_id, status=JobStatus.error, ended_at=time.time(), message=error_message)
+    finally:
+        try:
+            if job_id in cancellation_flags:
+                del cancellation_flags[job_id]
+            cleanup_path(tmp_path)
+            if full_wav_path:
+                cleanup_path(full_wav_path)
+        except Exception:
+            pass
