@@ -15,3 +15,22 @@ class WhisperFactory:
 
 factory = WhisperFactory()
 get_model = factory.get
+
+
+class SenkoFactory:
+    def __init__(self, device='auto', warmup=True, quiet=False):
+        self.device = device
+        self.warmup = warmup
+        self.quiet = quiet
+
+    @lru_cache(maxsize=1)
+    def get(self):
+        try:
+            import senko
+            return senko.Diarizer(device=self.device, warmup=self.warmup, quiet=self.quiet)
+        except ImportError:
+            raise RuntimeError("senko package is not installed. Please install it using 'pip install \"git+https://github.com/narcotic-sh/senko.git[nvidia]\"'")
+
+
+senko_factory = SenkoFactory()
+get_senko = senko_factory.get

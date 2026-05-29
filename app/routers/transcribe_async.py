@@ -5,12 +5,13 @@ from fastapi.responses import JSONResponse
 from pathlib import Path
 import asyncio, time, logging
 from urllib.request import urlopen
-from ..dependencies import get_model
+from ..dependencies import get_model, get_senko
 from ..services.transcriber import TranscriptionService
+from faster_whisper.audio import decode_audio
 from ..services.audio_processor import AudioProcessor
 from ..services.temp_files import create_named_temp_file, cleanup_path
 from ..config.settings import settings
-from ..jobs import create_job, update_job, get_job, JobStatus
+from ..jobs import create_job, update_job, get_job, JobStatus, get_active_job_count
 from ..schemas import TranscribeQuery
 
 logger = logging.getLogger("app.timing")
@@ -92,10 +93,23 @@ def cancel_job(job_id: str):
     return {"status": "job not found or already finished"}
 
 
+@router.get("/status")
+def server_status():
+    """
+    STT 서버의 현재 상태를 반환합니다. 
+    Node.js 스케줄러가 서버가 대기 중(idle)인지 작업 중(busy)인지 확인하여 작업을 할당할 수 있도록 합니다.
+    """
+    active_jobs = get_active_job_count()
+    return {
+        "status": "busy" if active_jobs > 0 else "idle",
+        "active_jobs": active_jobs,
+        "message": "작업 처리 중" if active_jobs > 0 else "대기 중"
+    }
+
 async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
     update_job(job_id, status=JobStatus.processing, started_at=time.time(), message="downloading")
     tmp_path = None
-    chunk_paths = []
+    full_wav_path = None
     try:
         tmp_path = _download_to_temp(media_url)
     except HTTPException:
@@ -108,6 +122,8 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
     try:
         update_job(job_id, message="received")
         model = get_model()
+        diarizer = get_senko()
+        
         ap = AudioProcessor(
             path=tmp_path,
             sr=settings.DEFAULT_SR,
@@ -116,29 +132,50 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
             max_bytes=settings.MAX_AUDIO_BYTES,
         )
 
-        update_job(job_id, message="converting (segmenting audio)")
+        update_job(job_id, message="extracting full audio")
         
-        # 9시간 등 >4GB 파일 처리를 위해 ffmpeg로 직접 1시간 단위 분할
-        segment_time = 3600
-        chunk_paths = ap.segment(segment_time=segment_time, start=query.start, end=query.end)
+        # 1. 전체 오디오를 WAV로 추출
+        full_wav_path = ap.extract_wav(start=query.start, end=query.end)
 
-        # 1. TranscriptionService 인스턴스화
+        update_job(job_id, message="diarizing (senko)")
+        
+        # 2. Senko 화자 분리
+        senko_result = diarizer.diarize(str(full_wav_path), generate_colors=False)
+        merged_segments = senko_result.get("merged_segments", [])
+        
+        update_job(job_id, message="loading audio for slicing")
+        
+        # 3. 오디오 배열 메모리 로드
+        audio_array = decode_audio(str(full_wav_path), sampling_rate=settings.DEFAULT_SR)
+        
+        # 4. TranscriptionService 인스턴스화
         svc = TranscriptionService(source=None, model=model, sr=settings.DEFAULT_SR, ch=settings.DEFAULT_CH)
 
         update_job(job_id, message="transcribing", progress=0.0)
         
         raw_segments = []
-        total_duration = 0.0
+        total_duration = float(audio_array.shape[0]) / settings.DEFAULT_SR
         
-        for i, chunk_path in enumerate(chunk_paths):
+        for i, spk_seg in enumerate(merged_segments):
             if cancellation_flags.get(job_id) is True:
                 logger.warning(f"🛑 [Process Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
                 return
             
-            # 2. 제너레이터(segments) 받아오기
-            svc.source_path = chunk_path
+            s_time = float(spk_seg["start"])
+            e_time = float(spk_seg["end"])
+            speaker = spk_seg.get("speaker", "SPEAKER_00")
+            
+            s_sample = int(s_time * settings.DEFAULT_SR)
+            e_sample = int(e_time * settings.DEFAULT_SR)
+            
+            if e_sample <= s_sample:
+                continue
+                
+            seg_audio = audio_array[s_sample:e_sample]
+            
+            # Whisper Transcribe
             segments, info = svc.model.transcribe(
-                str(chunk_path),
+                seg_audio,
                 task=query.task,
                 language=query.language,
                 vad_filter=query.vad,
@@ -151,44 +188,37 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
                 condition_on_previous_text=False,
             )
 
-            chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
-            time_offset = total_duration + query.start
-
-            # 3. 취소 여부 체크 및 진행률 업데이트
-            for seg in segments:
+            # Whisper 세그먼트 시간 보정 및 병합
+            for w_seg in segments:
                 if cancellation_flags.get(job_id) is True:
                     logger.warning(f"🛑 [Process Killer] Task {job_id} cancelled by Node server. Stopping immediately.")
                     return
                 
-                txt = (seg.text or "").strip()
+                txt = (w_seg.text or "").strip()
                 if txt:
-                    # logprob가 None인 경우를 대비해 0.0으로 기본값 처리
-                    avg_logprob = getattr(seg, 'avg_logprob', None)
+                    avg_logprob = getattr(w_seg, 'avg_logprob', None)
                     if avg_logprob is None:
                         avg_logprob = 0.0
                         
                     raw_segments.append({
-                        "start": float(seg.start) + time_offset,
-                        "end": float(seg.end) + time_offset,
+                        "start": float(w_seg.start) + s_time + query.start,
+                        "end": float(w_seg.end) + s_time + query.start,
                         "content": txt,
-                        "avg_logprob": avg_logprob
+                        "avg_logprob": avg_logprob,
+                        "speaker": speaker
                     })
                 
-                if chunk_duration > 0:
-                    # 전체 진행률: (현재 완료된 청크 수 + 현재 청크 진행률) / 전체 청크 수
-                    current_progress = (i + (seg.end / chunk_duration)) / len(chunk_paths)
+                # 진행률 업데이트
+                if e_time > s_time:
+                    current_progress = (i + (w_seg.end / (e_time - s_time))) / max(1, len(merged_segments))
                     update_job(job_id, progress=min(0.99, current_progress))
                 await asyncio.sleep(0)
 
-            total_duration += chunk_duration
-            
-            # 청크 처리 완료 후 임시 파일 삭제
-            cleanup_path(chunk_path)
-
-        # 4. hallucination 대응
+        # 5. hallucination 대응 및 병합
+        raw_segments.sort(key=lambda x: x["start"])
         processed_segments = svc._post_process_segments(raw_segments)
         
-        # 5. 텍스트 병합
+        # 6. 텍스트 병합
         all_text = " ".join([seg["content"] for seg in processed_segments])
 
         now = datetime.now()
@@ -216,8 +246,7 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
             if job_id in cancellation_flags:
                 del cancellation_flags[job_id]
             cleanup_path(tmp_path)
-            # chunk_paths에 남아있는 파일들이 있다면 정리 (에러 발생 시)
-            for cp in chunk_paths:
-                cleanup_path(cp)
+            if full_wav_path:
+                cleanup_path(full_wav_path)
         except Exception:
             pass

@@ -244,6 +244,42 @@ class AudioProcessor:
             
         return segments
 
+    def extract_wav(self, start: int = 0, end: int = 0) -> Path:
+        """
+        비디오/오디오에서 전체 구간(또는 start~end 구간)을 16kHz, mono, PCM16 WAV로 추출 (to local)
+        """
+        from app.services.temp_files import ensure_temp_dir
+        output_dir = ensure_temp_dir()
+        stem = self.source_audio_path.stem
+        output_path = output_dir / f"{stem}_full.wav"
+        
+        a_info = self.get_audio_info()
+        total_dur = float(a_info.get("duration", 0.0) or 0.0)
+        actual_start = float(start)
+        actual_end = float(end) if end > start and start >= 0 else total_dur
+        
+        cmd = [
+            _ffmpeg,
+            "-y",
+            "-ss", str(actual_start),
+            "-t", str(actual_end - actual_start),
+            "-i", str(self.source_audio_path),
+            "-vn",  # 비디오 스트림 무시
+            "-map", "0:a:0",  # 첫 번째 오디오 스트림 선택
+            "-acodec", "pcm_s16le",
+            "-ac", str(self.target_channels),
+            "-ar", str(self.target_sr),
+            str(output_path)
+        ]
+        print(f"[extract_wav] Running ffmpeg: {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as err:
+            err_msg = err.stderr.decode("utf-8", errors="ignore") if err.stderr else "Unknown error"
+            raise RuntimeError(f"FFmpeg extraction failed: {err_msg}")
+            
+        return output_path
+
     def convert(
         self,
         start: int = 0,
