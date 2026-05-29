@@ -141,7 +141,7 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
         
         # 2. Senko 화자 분리
         senko_result = diarizer.diarize(str(full_wav_path), generate_colors=False)
-        merged_segments = senko_result.get("merged_segments", [])
+        merged_segments = senko_result.get("merged_segments", []) if senko_result else []
         
         update_job(job_id, message="loading audio for slicing")
         
@@ -155,6 +155,9 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
         
         raw_segments = []
         total_duration = float(audio_array.shape[0]) / settings.DEFAULT_SR
+        
+        if not merged_segments:
+            merged_segments = [{"start": 0.0, "end": total_duration, "speaker": "SPEAKER_00"}]
         
         for i, spk_seg in enumerate(merged_segments):
             if cancellation_flags.get(job_id) is True:
