@@ -135,7 +135,29 @@ async def _worker(job_id: str, media_url: str, query: TranscribeQuery):
         update_job(job_id, message="extracting full audio")
         
         # 1. 전체 오디오를 WAV로 추출
-        full_wav_path = ap.extract_wav(start=query.start, end=query.end)
+        try:
+            full_wav_path = ap.extract_wav(start=query.start, end=query.end)
+        except RuntimeError as e:
+            if "No audio stream found" in str(e):
+                logger.info(f"Task {job_id}: No audio stream found. Returning empty result.")
+                now = datetime.now()
+                empty_result = {
+                    "language": query.language,
+                    "duration": 0.0,
+                    "created_at": now.strftime("%Y-%m-%d %H:%M:%S.") + str(now.microsecond)[-3:],
+                    "result": {"text": "", "segments": []},
+                }
+                update_job(
+                    job_id, 
+                    status=JobStatus.done, 
+                    ended_at=time.time(), 
+                    progress=1.0, 
+                    message="done (no audio)", 
+                    result=empty_result
+                )
+                return
+            else:
+                raise e
 
         update_job(job_id, message="diarizing (senko)")
         
