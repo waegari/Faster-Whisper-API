@@ -7,7 +7,10 @@ import subprocess
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.job_control import JobControl
 
 import ffmpeg
 from pydub import AudioSegment
@@ -77,15 +80,41 @@ class AudioProcessor:
         br: str = _BR,
         channels: int = _CH,
         max_bytes: int = _MAX_BYTES,
+        job_control: "Optional[JobControl]" = None,
     ):
         self.source_audio_path = Path(path) if isinstance(path, str) else path
         self.target_sr = int(sr)
         self.target_br = br
         self.target_channels = int(channels)
         self.max_bytes = int(max_bytes)
+        # 취소 시 실행 중인 ffmpeg/ffprobe를 kill하기 위한 훅 (attach_process/detach_process/check)
+        self.job_control = job_control
 
         self.silence_boundaries: Optional[List[Tuple[float, float]]] = None
         self.audio_info: Optional[dict] = None
+
+    def _run_process(self, cmd: List[str], *, capture_stdout: bool = False) -> bytes:
+        """서브프로세스 실행. job_control이 있으면 취소 시 즉시 kill 되고 JobCancelled가 발생한다."""
+        ctrl = self.job_control
+        if ctrl is not None:
+            ctrl.check()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if ctrl is not None:
+            ctrl.attach_process(proc)
+        try:
+            stdout, stderr = proc.communicate()
+        finally:
+            if ctrl is not None:
+                ctrl.detach_process()
+        if ctrl is not None:
+            ctrl.check()  # kill로 종료된 경우 returncode 검사 전에 JobCancelled 발생
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+        return stdout or b""
 
     def _export_to_disk(self, data: bytes, stem: str = "audio") -> Path:
         """버퍼 초과/디스크 저장 요청 시 WAV로 파일 저장"""
@@ -122,7 +151,7 @@ class AudioProcessor:
 
         path = str(self.source_audio_path)
         cmd = [
-            "ffprobe",
+            _ffprobe,
             "-v",
             "error",
             "-select_streams",
@@ -135,7 +164,7 @@ class AudioProcessor:
             "json",
             path,
         ]
-        info = subprocess.check_output(cmd, text=True)
+        info = self._run_process(cmd, capture_stdout=True).decode("utf-8", errors="ignore")
         obj = json.loads(info)
 
         streams = obj.get("streams", [])
@@ -235,7 +264,7 @@ class AudioProcessor:
             ]
             print(f"[segment] Running ffmpeg for chunk {i}: {' '.join(cmd)}")
             try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                self._run_process(cmd)
             except subprocess.CalledProcessError as err:
                 err_msg = err.stderr.decode("utf-8", errors="ignore") if err.stderr else "Unknown error"
                 raise RuntimeError(f"FFmpeg segmentation failed at chunk {i}: {err_msg}")
@@ -273,7 +302,7 @@ class AudioProcessor:
         ]
         print(f"[extract_wav] Running ffmpeg: {' '.join(cmd)}")
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self._run_process(cmd)
         except subprocess.CalledProcessError as err:
             err_msg = err.stderr.decode("utf-8", errors="ignore") if err.stderr else "Unknown error"
             raise RuntimeError(f"FFmpeg extraction failed: {err_msg}")

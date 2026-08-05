@@ -18,11 +18,13 @@ class Settings:
     MAX_CHUNK_DURATION_MS: int = (2 * 60 + 5) * 60 * 1000
     TEMP_DIR: Path = Path(r"Temp")
     TEMP_FILE_TTL_HOURS: int = 24
+    JOB_MAX_MS: int = 3600000  # 잡 자체 실행 TTL (0 = 비활성)
 
     def __post_init__(self):
         self.openai_api_key = os.getenv("OPENAI_API_KEY", self.openai_api_key)
         self.TEMP_DIR = Path(os.getenv("TEMP_DIR", str(self.TEMP_DIR))).resolve()
         self.TEMP_FILE_TTL_HOURS = int(os.getenv("TEMP_FILE_TTL_HOURS", str(self.TEMP_FILE_TTL_HOURS)))
+        self.JOB_MAX_MS = int(os.getenv("STT_JOB_MAX_MS", str(self.JOB_MAX_MS)))
 
 
 settings = Settings()
