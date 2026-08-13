@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Segment(BaseModel):
@@ -28,3 +28,8 @@ class TranscribeQuery(BaseModel):
     end: int = 0
     vad: bool = True
     word_timestamps: bool = False
+    max_speech_duration_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="VAD 최장 발화 길이(초). 생략 또는 null이면 무제한.",
+    )

@@ -251,13 +251,17 @@ def _worker(job_id: str, media_url: str, query: TranscribeQuery, ctrl: JobContro
 
             seg_audio = audio_array[s_sample:e_sample]
 
+            vad_parameters = dict(min_silence_duration_ms=300)
+            if query.max_speech_duration_s is not None:
+                vad_parameters["max_speech_duration_s"] = query.max_speech_duration_s
+            
             # Whisper Transcribe
             segments, info = svc.model.transcribe(
                 seg_audio,
                 task=query.task,
                 language=query.language,
                 vad_filter=query.vad,
-                vad_parameters=dict(min_silence_duration_ms=300),
+                vad_parameters=vad_parameters,
                 temperature=0.0,
                 beam_size=6,
                 best_of=1,
