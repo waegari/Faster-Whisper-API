@@ -31,5 +31,5 @@ class TranscribeQuery(BaseModel):
     max_speech_duration_s: Optional[float] = Field(
         default=None,
         gt=0,
-        description="VAD 최장 발화 길이(초). 생략 또는 null이면 무제한.",
+        description="VAD 최장 발화 길이(초). 값이 있으면 해당 길이의 조각 단위로 전사·반환. 생략 또는 null이면 무제한(통짜 전사).",
     )

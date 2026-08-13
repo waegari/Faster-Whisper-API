@@ -9,6 +9,7 @@ from urllib.request import urlopen
 from ..dependencies import get_model, get_senko
 from ..services.transcriber import TranscriptionService
 from faster_whisper.audio import decode_audio
+from faster_whisper.vad import VadOptions, get_speech_timestamps
 from ..services.audio_processor import AudioProcessor
 from ..services.temp_files import create_named_temp_file, cleanup_path
 from ..config.settings import settings
@@ -34,6 +35,29 @@ def parse_query(
     q: str = Form('{"task":"transcribe","language":"ko","vad":true,"is_video":false,"word_timestamps":false}'),
 ) -> TranscribeQuery:
     return TranscribeQuery.model_validate_json(q)
+
+def _clip_timestamps_from_vad(
+    audio,
+    *,
+    sampling_rate: int,
+    max_speech_duration_s: float,
+    min_silence_duration_ms: int = 300,
+) -> list[float]:
+    """VAD 발화 조각을 Whisper clip_timestamps(start, end, start, end, ...)로 변환."""
+    chunks = get_speech_timestamps(
+        audio,
+        VadOptions(
+            min_silence_duration_ms=min_silence_duration_ms,
+            max_speech_duration_s=max_speech_duration_s,
+        ),
+        sampling_rate=sampling_rate,
+    )
+    clips: list[float] = []
+    for chunk in chunks:
+        clips.append(chunk["start"] / sampling_rate)
+        clips.append(chunk["end"] / sampling_rate)
+    return clips
+
 
 def to_prob_int(avg_logprob) -> int:
     # exp(-0.1) ≒ 0.904 -> 90
@@ -251,17 +275,9 @@ def _worker(job_id: str, media_url: str, query: TranscribeQuery, ctrl: JobContro
 
             seg_audio = audio_array[s_sample:e_sample]
 
-            vad_parameters = dict(min_silence_duration_ms=300)
-            if query.max_speech_duration_s is not None:
-                vad_parameters["max_speech_duration_s"] = query.max_speech_duration_s
-            
-            # Whisper Transcribe
-            segments, info = svc.model.transcribe(
-                seg_audio,
+            transcribe_kwargs = dict(
                 task=query.task,
                 language=query.language,
-                vad_filter=query.vad,
-                vad_parameters=vad_parameters,
                 temperature=0.0,
                 beam_size=6,
                 best_of=1,
@@ -269,6 +285,25 @@ def _worker(job_id: str, media_url: str, query: TranscribeQuery, ctrl: JobContro
                 word_timestamps=query.word_timestamps,
                 condition_on_previous_text=False,
             )
+
+            if query.max_speech_duration_s is not None:
+                # 조각 단위: VAD로 상한 길이만큼 자른 뒤 clip_timestamps로 구간별 전사.
+                # (기본 transcribe는 VAD 조각을 다시 이어 붙여 통으로 디코딩함)
+                clip_timestamps = _clip_timestamps_from_vad(
+                    seg_audio,
+                    sampling_rate=settings.DEFAULT_SR,
+                    max_speech_duration_s=query.max_speech_duration_s,
+                )
+                if not clip_timestamps:
+                    continue
+                transcribe_kwargs["clip_timestamps"] = clip_timestamps
+                transcribe_kwargs["vad_filter"] = False
+                transcribe_kwargs["without_timestamps"] = False
+            else:
+                transcribe_kwargs["vad_filter"] = query.vad
+                transcribe_kwargs["vad_parameters"] = dict(min_silence_duration_ms=300)
+
+            segments, info = svc.model.transcribe(seg_audio, **transcribe_kwargs)
 
             # Whisper 세그먼트 시간 보정 및 병합
             # (segments는 lazy generator라 매 반복이 곧 추론 진행 → 취소 체크가 실제로 추론을 멈춘다)
