@@ -127,6 +127,8 @@ class TranscriptionService:
             }
             if "speaker" in seg:
                 seg_dict["speaker"] = seg["speaker"]
+            if "words" in seg:
+                seg_dict["words"] = seg["words"]
                 
             processed_raw.append(seg_dict)
 

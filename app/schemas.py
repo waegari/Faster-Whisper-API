@@ -2,6 +2,13 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class Word(BaseModel):
+    word: str
+    start: float
+    end: float
+    probability: float
+
+
 class Segment(BaseModel):
     index: int
     start: float
@@ -9,6 +16,8 @@ class Segment(BaseModel):
     content: str
     avg_logprob: float
     prob: int
+    speaker: Optional[str] = None
+    words: Optional[List[Word]] = None
 
 
 class TranscribeResult(BaseModel):
@@ -27,7 +36,10 @@ class TranscribeQuery(BaseModel):
     start: int = 0
     end: int = 0
     vad: bool = True
-    word_timestamps: bool = False
+    word_timestamps: bool = Field(
+        default=False,
+        description="단어 단위 타임스탬프. true면 각 세그먼트에 words[]를 포함.",
+    )
     max_speech_duration_s: Optional[float] = Field(
         default=None,
         gt=0,

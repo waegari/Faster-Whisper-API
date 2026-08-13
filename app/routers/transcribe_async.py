@@ -1,6 +1,7 @@
 from datetime import datetime
 import math
 import uuid
+from typing import Optional
 from fastapi import APIRouter, Request, Query, BackgroundTasks, Depends, HTTPException, Form
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -59,6 +60,24 @@ def _clip_timestamps_from_vad(
     return clips
 
 
+def _words_with_offset(w_seg, offset: float) -> list[dict] | None:
+    words = getattr(w_seg, "words", None)
+    if not words:
+        return None
+    out = []
+    for w in words:
+        token = getattr(w, "word", None)
+        if token is None:
+            continue
+        out.append({
+            "word": token,
+            "start": float(w.start) + offset,
+            "end": float(w.end) + offset,
+            "probability": float(getattr(w, "probability", 0.0) or 0.0),
+        })
+    return out or None
+
+
 def to_prob_int(avg_logprob) -> int:
     # exp(-0.1) ≒ 0.904 -> 90
     # 0~100 사이 int로 변환
@@ -94,12 +113,18 @@ async def transcribe_async(
     background_tasks: BackgroundTasks,
     media_url: str = Form(..., description="미디어 파일 URL (스케줄러가 서빙하는 결과 URL 등)"),
     query: TranscribeQuery = Depends(parse_query),
+    word_timestamps: Optional[bool] = Form(
+        None,
+        description="단어 단위 타임스탬프. 지정 시 query JSON의 word_timestamps보다 우선.",
+    ),
     request_id: str = Query(None),
 ):
     """파일 업로드 없이 media_url만 받아 202 즉시 반환. worker에서 URL 다운로드 후 전사.
 
     서버당 1잡 불변식: 이미 작업 중이면 409를 반환한다.
     """
+    if word_timestamps is not None:
+        query.word_timestamps = word_timestamps
     final_req_id = request_id or request.headers.get("X-Request-ID") or getattr(query, "request_id", None)
     job_id = final_req_id or str(uuid.uuid4())
 
@@ -316,13 +341,19 @@ def _worker(job_id: str, media_url: str, query: TranscribeQuery, ctrl: JobContro
                     if avg_logprob is None:
                         avg_logprob = 0.0
 
-                    raw_segments.append({
-                        "start": float(w_seg.start) + s_time + query.start,
-                        "end": float(w_seg.end) + s_time + query.start,
+                    time_offset = s_time + query.start
+                    raw_seg = {
+                        "start": float(w_seg.start) + time_offset,
+                        "end": float(w_seg.end) + time_offset,
                         "content": txt,
                         "avg_logprob": avg_logprob,
                         "speaker": speaker
-                    })
+                    }
+                    if query.word_timestamps:
+                        words = _words_with_offset(w_seg, time_offset)
+                        if words:
+                            raw_seg["words"] = words
+                    raw_segments.append(raw_seg)
 
                 # 진행률 업데이트
                 if e_time > s_time:
